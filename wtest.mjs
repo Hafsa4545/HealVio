@@ -1,0 +1,11 @@
+import worker from './worker.mjs';
+let sent;
+globalThis.fetch = async (url, init) => { sent = { url, init: { ...init, body: JSON.parse(init.body) } }; return new Response(JSON.stringify({ content: [{ type: 'thinking', thinking: '...' }, { type: 'text', text: '{"ok":true}' }], stop_reason: 'end_turn' }), { status: 200 }); };
+const env = { ANTHROPIC_API_KEY: 'sk-test', ALLOWED_ORIGINS: 'https://healvio.netlify.app, http://localhost:8080' };
+const mk = (origin, body, method = 'POST') => new Request('https://w.dev/', { method, headers: { Origin: origin, 'content-type': 'application/json' }, body: method === 'POST' ? JSON.stringify(body) : undefined });
+let r = await worker.fetch(mk('http://localhost:8080', { prompt: 'hi', tier: 'quick' }), env);
+console.log('allowed:', r.status, await r.text(), '| model:', sent.init.body.model, '| version hdr:', sent.init.headers['anthropic-version'], '| CORS:', r.headers.get('Access-Control-Allow-Origin'));
+r = await worker.fetch(mk('https://evil.example', { prompt: 'hi' }), env); console.log('blocked:', r.status);
+r = await worker.fetch(mk('https://healvio.netlify.app', null, 'OPTIONS'), env); console.log('preflight:', r.status, r.headers.get('Access-Control-Allow-Origin'));
+r = await worker.fetch(mk('https://healvio.netlify.app', { prompt: 'x' }), { ALLOWED_ORIGINS: 'https://healvio.netlify.app' }); console.log('no key:', r.status, await r.text());
+r = await worker.fetch(mk('https://healvio.netlify.app', { prompt: 'summarize' }), env); console.log('default model:', sent.init.body.model);

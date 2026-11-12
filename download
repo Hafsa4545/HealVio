@@ -1,0 +1,12 @@
+# never commit keys or service accounts
+*adminsdk*.json
+*service-account*.json
+*serviceAccount*.json
+.env
+.dev.vars
+# Firebase and Node files
+.firebase/
+.firebaserc
+node_modules/
+*.zip
+*.bak*

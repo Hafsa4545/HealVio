@@ -1,0 +1,38 @@
+{
+  "hosting": {
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      ".firebaserc",
+      ".firebase/**",
+      ".git/**",
+      "firebase/**",
+      "ai-server/**",
+      "demo-data/**",
+      "README.md",
+      "**/node_modules/**",
+      "**/*adminsdk*.json",
+      "**/*service-account*.json",
+      "**/*serviceAccount*.json",
+      "**/*.zip",
+      "**/*.bak*",
+      "tests/**",
+      "LICENSE",
+      ".gitignore"
+    ],
+    "headers": [
+      {
+        "source": "**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      }
+    ]
+  },
+  "firestore": {
+    "rules": "firebase/firestore.rules"
+  }
+}

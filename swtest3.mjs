@@ -1,0 +1,13 @@
+import fs from 'fs';
+const L = {}; let pass = 0, total = 0;
+const ok = (n, c, x = '') => { total++; if (c) pass++; console.log((c ? 'PASS ' : 'FAIL ') + n, x === '' ? '' : '| ' + JSON.stringify(x)); };
+let netDelay = 0, netFail = false;
+globalThis.fetch = (req) => new Promise((res, rej) => setTimeout(() => netFail ? rej(new Error('offline')) : res({ ok: true, clone() { return this; }, src: 'network' }), netDelay));
+const cache = { match: async r => (r === './index.html' || r.url) ? { src: 'phone' } : undefined, open: async () => ({ put: async () => {}, addAll: async () => {} }), keys: async () => [] };
+const self = { addEventListener: (t, f) => (L[t] = f), registration: { scope: 'https://healvio.web.app/' }, clients: {}, location: { origin: 'https://healvio.web.app' }, skipWaiting() {} };
+new Function('self', 'caches', fs.readFileSync('/home/claude/healvio-app/sw.js', 'utf8'))(self, cache);
+const get = async () => { let p; const t0 = Date.now(); L.fetch({ request: { method: 'GET', url: 'https://healvio.web.app/', mode: 'navigate' }, respondWith: x => (p = x) }); const r = await p; return [r.src, Date.now() - t0]; };
+netDelay = 100; let [src, ms] = await get(); ok('good network: newest version', src === 'network' && ms < 500, [src, ms]);
+netDelay = 6000; [src, ms] = await get(); ok('slow network: opens from the phone in 2.5 s', src === 'phone' && ms >= 2400 && ms < 3200, [src, ms]);
+netFail = true; netDelay = 50; [src, ms] = await get(); ok('no internet: opens from the phone', src === 'phone', [src, ms]);
+console.log(`PASSED ${pass} / ${total}`);

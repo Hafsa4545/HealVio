@@ -1,0 +1,273 @@
+rules_version = '2';
+
+// ============================================================
+//  HEALVIO — PRODUCTION SECURITY RULES
+// ============================================================
+//  Who can see and change what:
+//   • Everyone must be logged in (phone OTP or Google).
+//   • Patients see only their own consultations, prescriptions and orders.
+//   • Doctors see only consultations booked with them.
+//   • Medical stores see only prescriptions sent to them.
+//   • Admins (people listed in the "admins" collection) see everything,
+//     approve/reject/terminate doctors and stores.
+//   • Doctor certificates are visible only to the doctor and admins.
+//   • Calls: only the doctor and patient of a live consultation can call each other.
+//   • Home delivery: the patient's address and the delivery phone's live location are
+//     visible only to that patient, that store and admins.
+//   • Payments: only the Healvio server (after PayPal confirms the money) can mark
+//     a consultation fee or medicine order as paid. No phone can fake it.
+//
+//  Publish: Firebase console → Firestore Database → Rules → paste → Publish
+//           (or run: firebase deploy --only firestore:rules)
+// ============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function isAdmin() { return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+    function myAccount() { return get(/databases/$(database)/documents/accounts/$(request.auth.uid)).data; }
+    function isApproved() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/accounts/$(request.auth.uid))
+        && myAccount().status == 'approved';
+    }
+    function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+    function req(rid) { return get(/databases/$(database)/documents/requests/$(rid)).data; }
+
+    // ---- Admins: add documents here by hand in the Firebase console (README) ----
+    match /admins/{uid} {
+      allow get: if signedIn() && me() == uid;
+      allow list, write: if false;
+    }
+
+    // ---- Private account details (name, phone, email, documents list) ----
+    match /accounts/{uid} {
+      allow get: if signedIn() && (me() == uid || isAdmin());
+      allow list: if isAdmin();
+      allow create: if signedIn() && (
+        isAdmin() || (
+          me() == uid
+          && request.resource.data.id == uid
+          && ((request.resource.data.role == 'patient' && request.resource.data.status == 'active')
+              || (request.resource.data.role in ['doctor', 'store'] && request.resource.data.status == 'draft'))
+          && request.resource.data.get('demo', false) == false
+        ));
+      allow update: if signedIn() && (
+        isAdmin() || (
+          me() == uid
+          && request.resource.data.id == uid
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.get('demo', false) == resource.data.get('demo', false)
+          && (request.resource.data.status == resource.data.status
+              || (resource.data.status in ['draft', 'rejected'] && request.resource.data.status == 'pending'))
+        ));
+      allow delete: if signedIn() && (me() == uid || isAdmin());
+    }
+
+    // ---- Public profiles of approved doctors and stores ----
+    match /public/{uid} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin() || (
+        signedIn() && me() == uid && isApproved()
+        && request.resource.data.id == uid
+        && request.resource.data.status == 'approved'
+        && request.resource.data.role == myAccount().role
+      );
+      allow delete: if signedIn() && (me() == uid || isAdmin());
+    }
+
+    // ---- Consultations ----
+    match /requests/{rid} {
+      allow read: if signedIn() && (resource.data.patientId == me() || resource.data.doctorId == me() || isAdmin());
+
+      allow create: if signedIn()
+        && request.resource.data.patientId == me()
+        && request.resource.data.status == 'requested'
+        && !request.resource.data.keys().hasAny(['paid', 'refund'])
+        && exists(/databases/$(database)/documents/public/$(request.resource.data.doctorId));
+
+      allow update: if signedIn() && (
+        isAdmin()
+        // the doctor runs the consultation (accept, waitlist, start, end, prescription link)
+        || (resource.data.doctorId == me()
+            && request.resource.data.doctorId == resource.data.doctorId
+            && request.resource.data.patientId == resource.data.patientId
+            && !changed().hasAny(['rating', 'review', 'ratedAt', 'paid', 'refund'])
+            // a paid visit can only be cancelled through the server, which refunds the patient
+            && !(request.resource.data.status == 'rejected' && resource.data.status != 'rejected' && resource.data.get('paid', null) != null && resource.data.get('refund', null) == null))
+        // the patient can cancel, rate after completion, and save an AI summary
+        || (resource.data.patientId == me()
+            && changed().hasOnly(['status', 'closedAt', 'updatedAt', 'rating', 'review', 'ratedAt', 'aiSummary', 'rateSkipped'])
+            && (request.resource.data.status == resource.data.status
+                || (request.resource.data.status == 'cancelled' && resource.data.status in ['requested', 'waiting', 'accepted'] && resource.data.get('paid', null) == null))
+            && (!changed().hasAny(['rating']) || resource.data.status == 'completed'))
+      );
+      allow delete: if isAdmin();
+
+      // chat messages of this consultation
+      match /messages/{mid} {
+        allow read: if signedIn() && (req(rid).patientId == me() || req(rid).doctorId == me() || isAdmin());
+        allow create: if signedIn()
+          && (req(rid).patientId == me() || req(rid).doctorId == me())
+          && (request.resource.data.from == me() || request.resource.data.from == 'system');
+      }
+    }
+
+    // ---- Prescriptions: written only by the consulting, approved doctor ----
+    match /prescriptions/{id} {
+      allow read: if signedIn() && (resource.data.patientId == me() || resource.data.doctorId == me() || isAdmin());
+      allow create: if signedIn() && isApproved()
+        && request.resource.data.doctorId == me()
+        && req(request.resource.data.requestId).doctorId == me()
+        && req(request.resource.data.requestId).patientId == request.resource.data.patientId;
+      allow update: if signedIn()
+        && resource.data.doctorId == me()
+        && request.resource.data.doctorId == me()
+        && request.resource.data.patientId == resource.data.patientId;
+      allow delete: if isAdmin();
+    }
+
+    // ---- Medicine orders sent to stores ----
+    match /orders/{id} {
+      allow read: if signedIn() && (resource.data.patientId == me() || resource.data.storeId == me() || isAdmin());
+      allow create: if signedIn()
+        && request.resource.data.patientId == me()
+        && request.resource.data.status == 'sent'
+        && !request.resource.data.keys().hasAny(['paid', 'refund', 'total', 'deliveryFee', 'rider', 'riderName', 'riderPhone', 'outAt', 'deliveredAt', 'collectedAt'])
+        // from a Healvio prescription, or a photo of a paper prescription
+        && ((request.resource.data.get('rxId', null) == null && request.resource.data.get('paperRx', '') is string
+             && request.resource.data.paperRx.size() > 100 && request.resource.data.paperRx.size() < 1000000
+             && request.resource.data.paperRx.matches('^data:image/(jpeg|png|webp);base64,.*'))
+            || get(/databases/$(database)/documents/prescriptions/$(request.resource.data.rxId)).data.patientId == me());
+      allow update: if signedIn() && (
+        isAdmin()
+        // the store marks medicines available, sets the price and delivery fee (only until it is paid),
+        // and runs the home delivery (live location of the delivery phone, delivered)
+        || (resource.data.storeId == me() && changed().hasOnly(['status', 'items', 'note', 'total', 'deliveryFee', 'respondedAt', 'updatedAt', 'rider', 'riderName', 'riderPhone', 'outAt', 'nearAt', 'deliveredAt', 'collectedAt', 'closedAt'])
+            && (!changed().hasAny(['total', 'deliveryFee']) || resource.data.get('paid', null) == null)
+            && !(request.resource.data.status in ['unavailable', 'cancelled'] && resource.data.get('paid', null) != null && resource.data.get('refund', null) == null))
+        // the patient can cancel an unpaid order before it leaves the store (paid ones are refunded by the server)
+        || (resource.data.patientId == me() && resource.data.status in ['sent', 'ready', 'partial'] && request.resource.data.status == 'cancelled'
+            && changed().hasOnly(['status', 'closedAt', 'updatedAt']) && resource.data.get('paid', null) == null)
+      );
+      allow delete: if isAdmin();
+    }
+
+    // ---- In-app alerts ----
+    match /notifications/{id} {
+      allow read: if signedIn() && (resource.data.to == me() || (resource.data.to == 'admin' && isAdmin()));
+      allow create: if signedIn() && request.resource.data.text is string && request.resource.data.text.size() <= 600
+        && request.resource.data.get('from', me()) == me();
+      allow update: if signedIn()
+        && (resource.data.to == me() || (resource.data.to == 'admin' && isAdmin()))
+        && changed().hasOnly(['read', 'updatedAt']);
+      allow delete: if isAdmin();
+    }
+
+    // ---- Complaints ("Report a problem"): the grievance system required by the telemedicine guidelines ----
+    match /complaints/{id} {
+      allow read: if signedIn() && (resource.data.by == me() || isAdmin());
+      allow create: if signedIn()
+        && request.resource.data.id == id
+        && request.resource.data.by == me()
+        && request.resource.data.status == 'open'
+        && request.resource.data.text is string && request.resource.data.text.size() <= 2000
+        && !request.resource.data.keys().hasAny(['reply', 'resolvedAt']);
+      allow update: if isAdmin() && changed().hasOnly(['status', 'reply', 'resolvedAt', 'updatedAt']);
+      allow delete: if isAdmin();
+    }
+
+    // ---- Ratings and reviews (public, one per completed consultation) ----
+    match /reviews/{rid} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.id == rid
+        && request.resource.data.patientId == me()
+        && req(rid).patientId == me()
+        && req(rid).doctorId == request.resource.data.doctorId
+        && req(rid).status == 'completed'
+        && request.resource.data.rating is int
+        && request.resource.data.rating >= 1 && request.resource.data.rating <= 5;
+      // the doctor can post one public reply to a review
+      allow update: if signedIn() && resource.data.doctorId == me()
+        && changed().hasOnly(['reply', 'replyAt', 'updatedAt'])
+        && request.resource.data.reply is string && request.resource.data.reply.size() <= 600;
+      allow delete: if isAdmin();
+    }
+
+    // ---- Busy slots per doctor (so patients see real availability) ----
+    match /slots/{docId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && (me() == docId || isAdmin() || request.resource.data.keys().hasOnly(['id', 'emergency', 'updatedAt']));
+      allow update: if signedIn() && (me() == docId || isAdmin() || changed().hasOnly(['emergency', 'updatedAt']));
+      allow delete: if isAdmin();
+    }
+
+    // ---- In-app video & voice calls (only the two people in a live consultation) ----
+    //  Holds just the connection handshake. The call itself goes phone-to-phone.
+    match /calls/{cid} {
+      function callPair(d) {
+        return req(d.rid).status == 'live'
+          && ((req(d.rid).doctorId == me() && req(d.rid).patientId == d.to)
+              || (req(d.rid).patientId == me() && req(d.rid).doctorId == d.to));
+      }
+      function inCall() {
+        return get(/databases/$(database)/documents/calls/$(cid)).data.from == me()
+          || get(/databases/$(database)/documents/calls/$(cid)).data.to == me();
+      }
+      allow read: if signedIn() && (resource.data.from == me() || resource.data.to == me() || isAdmin());
+      allow create: if signedIn()
+        && request.resource.data.id == cid
+        && request.resource.data.from == me()
+        && request.resource.data.status == 'ringing'
+        && request.resource.data.kind in ['video', 'audio']
+        && request.resource.data.keys().hasOnly(['id', 'rid', 'from', 'to', 'fromName', 'kind', 'status', 'offer', 'rev', 'createdAt', 'updatedAt'])
+        && callPair(request.resource.data);
+      allow update: if signedIn()
+        && (resource.data.from == me() || resource.data.to == me())
+        && changed().hasOnly(['status', 'answer', 'acceptedAt', 'endedAt', 'endedBy', 'updatedAt', 'offer', 'rev', 'arev', 'restartAsk'])
+        && request.resource.data.status in ['ringing', 'accepted', 'declined', 'busy', 'cancelled', 'missed', 'ended'];
+      allow delete: if isAdmin();
+
+      // network paths found by each phone while connecting
+      match /ice/{iid} {
+        allow read: if signedIn() && inCall();
+        allow create: if signedIn() && inCall()
+          && request.resource.data.from == me()
+          && request.resource.data.keys().hasOnly(['from', 'c', 'rev', 'at']);
+      }
+    }
+
+    // ---- Phone notification addresses: one list per person, only they can see it ----
+    match /pushTokens/{uid} {
+      allow read, write: if signedIn() && me() == uid;
+    }
+
+    // ---- Medicine reminders: each patient's own; your worker sends them on time ----
+    match /reminders/{id} {
+      allow read, delete: if signedIn() && resource.data.uid == me();
+      allow create: if signedIn() && request.resource.data.uid == me();
+      allow update: if signedIn() && resource.data.uid == me() && request.resource.data.uid == me();
+    }
+
+    // ---- Health of the worker (last reminder run), for the admin page ----
+    match /system/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // ---- Log of sent phone notifications: used only by your worker ----
+    match /pushLog/{id} {
+      allow read, write: if false;
+    }
+
+    // ---- Images: doctor certificates (private) and signatures (public) ----
+    match /files/{fid} {
+      allow get: if signedIn() && (resource.data.get('public', false) == true || resource.data.owner == me() || isAdmin());
+      allow create: if signedIn() && request.resource.data.owner == me();
+      allow delete: if signedIn() && (resource.data.owner == me() || isAdmin());
+    }
+  }
+}
