@@ -1,5 +1,7 @@
 # Healvio
 
+<img width="1443" height="1090" alt="WhatsApp Image 2026-11-13 at 1 52 00 PM" src="https://github.com/user-attachments/assets/08f2cd34-90a2-4fc4-9305-de3942b655ed" />
+
 **AI telemedicine for India, in 12 languages, with PayPal at every step of care.**
 
 - **Live app:** https://healvio.web.app (installable on Android and iPhone)
